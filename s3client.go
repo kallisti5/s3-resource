@@ -1,7 +1,6 @@
 package s3resource
 
 import (
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -9,13 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"net/http"
-
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/minio/minio-go"
 	"github.com/cheggaaa/pb"
 )
 
@@ -38,9 +31,17 @@ type S3Client interface {
 // the backoff to some extent so it may be as low as 4 or as high as 8 minutes
 const maxRetries = 12
 
+type s3config struct {
+	endpoint	string
+	accessKey	string
+	secretKey	string
+	region		string
+
+	options		minio.Options
+}
+
 type s3client struct {
-	client  *s3.S3
-	session *session.Session
+	client  *minio.Client
 
 	progressOutput io.Writer
 }
@@ -61,20 +62,15 @@ func NewUploadFileOptions() UploadFileOptions {
 
 func NewS3Client(
 	progressOutput io.Writer,
-	awsConfig *aws.Config,
-	useV2Signing bool,
+	config s3config,
 ) S3Client {
-	sess := session.New(awsConfig)
-	client := s3.New(sess, awsConfig)
-
-	if useV2Signing {
-		setv2Handlers(client)
+	client, err := minio.New(config.endpoint, config.accessKey, config.secretKey, true)
+	if err != nil {
+		return nil
 	}
 
 	return &s3client{
 		client:  client,
-		session: sess,
-
 		progressOutput: progressOutput,
 	}
 }
@@ -87,43 +83,22 @@ func NewAwsConfig(
 	endpoint string,
 	disableSSL bool,
 	skipSSLVerification bool,
-) *aws.Config {
-	var creds *credentials.Credentials
-
-	if accessKey == "" && secretKey == "" {
-		creds = credentials.AnonymousCredentials
-	} else {
-		creds = credentials.NewStaticCredentials(accessKey, secretKey, sessionToken)
-	}
-
+) *s3config {
 	if len(regionName) == 0 {
 		regionName = "us-east-1"
 	}
-
-	var httpClient *http.Client
-	if skipSSLVerification {
-		httpClient = &http.Client{Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}}
-	} else {
-		httpClient = http.DefaultClient
+	if len(endpoint) == 0 {
+		endpoint := fmt.Sprintf("s3.%s.amazonaws.com", regionName)
 	}
 
-	awsConfig := &aws.Config{
-		Region:           aws.String(regionName),
-		Credentials:      creds,
-		S3ForcePathStyle: aws.Bool(true),
-		MaxRetries:       aws.Int(maxRetries),
-		DisableSSL:       aws.Bool(disableSSL),
-		HTTPClient:       httpClient,
+	config := &s3config{
+		region:				regionName,
+		secretKey:			secretKey,
+		accessKey:			accessKey,
+		endpoint:			endpoint,
 	}
 
-	if len(endpoint) != 0 {
-		endpoint := fmt.Sprintf("%s", endpoint)
-		awsConfig.Endpoint = &endpoint
-	}
-
-	return awsConfig
+	return config
 }
 
 func (client *s3client) BucketFiles(bucketName string, prefixHint string) ([]string, error) {
